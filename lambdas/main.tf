@@ -59,6 +59,11 @@ resource "aws_iam_role_policy_attachment" "rest_lambda_logging" {
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
+resource "aws_iam_role_policy_attachment" "ws_handler_lambda_logging" {
+  role       = aws_iam_role.ws_lambda_role.name
+  policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
+}
+
 resource "aws_lambda_function" "rest_lambda" {
   function_name = "rest_data_receiver"
   handler       = "index.handler"
@@ -132,6 +137,11 @@ resource "aws_lambda_function" "ws_lambda" {
   source_code_hash = filebase64sha256("websocket_lambda.zip")
 }
 
+resource "aws_cloudwatch_log_group" "ws_lambda_log_group" {
+  name              = "/aws/lambda/${aws_lambda_function.ws_lambda.function_name}"
+  retention_in_days = 14
+}
+
 resource "aws_lambda_event_source_mapping" "dynamodb_trigger" {
   event_source_arn = aws_dynamodb_table.iot_data.stream_arn
   function_name    = aws_lambda_function.ws_lambda.arn
@@ -189,4 +199,95 @@ resource "aws_iam_role_policy" "ws_lambda_dynamodb_stream" {
       }
     ]
   })
+}
+
+###################################
+# Connections Table (stores active WS clients)
+###################################
+resource "aws_dynamodb_table" "ws_connections" {
+  name         = "ws_connections"
+  billing_mode = "PAY_PER_REQUEST"
+  hash_key     = "connection_id"
+
+  attribute {
+    name = "connection_id"
+    type = "S"
+  }
+}
+
+###################################
+# Add APIGatewayManagementAPI + DynamoDB permissions for WS Lambda
+###################################
+resource "aws_iam_role_policy" "ws_lambda_extra_perms" {
+  name = "ws_lambda_extra_perms"
+  role = aws_iam_role.ws_lambda_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17",
+    Statement = [
+      {
+        Effect = "Allow",
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Scan"
+        ],
+        Resource = aws_dynamodb_table.ws_connections.arn
+      },
+      {
+        Effect = "Allow",
+        Action = [
+          "execute-api:ManageConnections"
+        ],
+        Resource = "${aws_apigatewayv2_api.ws_api.execution_arn}/*"
+      }
+    ]
+  })
+}
+
+###################################
+# Connect and Disconnect Lambdas
+###################################
+resource "aws_lambda_function" "ws_handler_lambda" {
+  function_name    = "websocket_handler"
+  handler          = "index.handler"
+  runtime          = "nodejs18.x"
+  role             = aws_iam_role.ws_lambda_role.arn
+  filename         = "websocket_handler.zip"
+  source_code_hash = filebase64sha256("websocket_handler.zip")
+}
+
+###################################
+# Integrations for connect/disconnect
+###################################
+resource "aws_apigatewayv2_integration" "ws_handler_integration" {
+  api_id           = aws_apigatewayv2_api.ws_api.id
+  integration_type = "AWS_PROXY"
+  integration_uri  = aws_lambda_function.ws_handler_lambda.invoke_arn
+}
+
+###################################
+# Routes for connect/disconnect
+###################################
+resource "aws_apigatewayv2_route" "ws_connect_route" {
+  api_id    = aws_apigatewayv2_api.ws_api.id
+  route_key = "$connect"
+  target    = "integrations/${aws_apigatewayv2_integration.ws_handler_integration.id}"
+}
+
+resource "aws_apigatewayv2_route" "ws_disconnect_route" {
+  api_id    = aws_apigatewayv2_api.ws_api.id
+  route_key = "$disconnect"
+  target    = "integrations/${aws_apigatewayv2_integration.ws_handler_integration.id}"
+}
+
+###################################
+# Lambda permissions for connect/disconnect
+###################################
+resource "aws_lambda_permission" "ws_connect_invoke" {
+  statement_id  = "AllowConnectInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = aws_lambda_function.ws_handler_lambda.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "${aws_apigatewayv2_api.ws_api.execution_arn}/*/*"
 }

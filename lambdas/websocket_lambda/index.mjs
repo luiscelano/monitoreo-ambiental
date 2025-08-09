@@ -9,29 +9,36 @@ import {
 
 const db = new DynamoDBClient();
 const wsClient = new ApiGatewayManagementApiClient({
-  endpoint: "https://<your-websocket-id>.execute-api.us-east-1.amazonaws.com/$default"
+  endpoint: "https://108dpxfuq2.execute-api.us-east-1.amazonaws.com/$default"
 });
 
 export const handler = async (event) => {
-  for (const record of event.Records) {
-    if (record.eventName !== "INSERT") continue;
+  try {
+    for (const record of event.Records) {
 
     const data = record.dynamodb.NewImage;
     const payload = {
-      deviceId: data.deviceId.S,
+      deviceId: data.device_id.S,
       timestamp: data.timestamp.S,
-      data: JSON.parse(data.data.S)
+      temperature: data.temperature.N,
+      humidity: data.humidity.N,
+      air_quality: data.air_quality.N,
+
     };
 
-    const connections = await db.send(new ScanCommand({ TableName: "connections" }));
+    const connections = await db.send(new ScanCommand({ TableName: "ws_connections" }));
 
     await Promise.all(
       connections.Items.map(conn =>
         wsClient.send(new PostToConnectionCommand({
-          ConnectionId: conn.connectionId.S,
+          ConnectionId: conn.connection_id.S,
           Data: Buffer.from(JSON.stringify(payload))
         }))
       )
     );
+    console.log("success!");
+  }
+  } catch (error) {
+    console.error('ws error:', error); 
   }
 };
